@@ -1,0 +1,171 @@
+#!/bin/sh
+
+echo "Boot complete; requesting gem5 CPU switch."
+/sbin/m5 exit
+
+CXL_BUILD=/home/ndctl/build
+CXL=${CXL_BUILD}/cxl/cxl
+DAXCTL=${CXL_BUILD}/daxctl/daxctl
+MEMDEV_WAIT_ATTEMPTS=12
+REGION_CREATE_ATTEMPTS=5
+DAXDEV_WAIT_ATTEMPTS=10
+ENABLE_MEMDEV_LOGGED=0
+
+memdev_active()
+{
+    ${CXL} list -M 2>/dev/null | grep -q '"memdev"[[:space:]]*:[[:space:]]*"mem0"'
+}
+
+enable_memdev_if_present()
+{
+    if memdev_active; then
+        return 0
+    fi
+
+    if [ -e /sys/bus/cxl/devices/mem0 ]; then
+        if [ "${ENABLE_MEMDEV_LOGGED}" -eq 0 ]; then
+            echo "[rcS] enabling mem0"
+            ${CXL} enable-memdev mem0 || true
+            ENABLE_MEMDEV_LOGGED=1
+        else
+            ${CXL} enable-memdev mem0 >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+wait_for_memdev()
+{
+    for i in $(seq 1 ${MEMDEV_WAIT_ATTEMPTS}); do
+        if memdev_active; then
+            return 0
+        fi
+        enable_memdev_if_present
+        if memdev_active; then
+            return 0
+        fi
+        sleep 1
+    done
+
+    echo "[rcS] active mem0 did not appear"
+    return 1
+}
+
+dump_cxl_probe_state()
+{
+    echo "[rcS] CXL probe diagnostics"
+    echo "[rcS] cxl list -M"
+    ${CXL} list -M || true
+    echo "[rcS] cxl list"
+    ${CXL} list || true
+
+    if [ -e /sys/bus/cxl/devices/mem0 ]; then
+        echo "[rcS] mem0 sysfs exists"
+        readlink -f /sys/bus/cxl/devices/mem0/driver 2>/dev/null || true
+    else
+        echo "[rcS] mem0 sysfs is missing"
+    fi
+
+    find /sys/bus/cxl -maxdepth 3 -print || true
+    dmesg | grep -iE 'cxl|ACPI0016|ACPI0017|decoder|memdev|mailbox|region' || true
+    lspci -vvv -s 01:00.0 || true
+}
+
+region_exists()
+{
+    ${CXL} list 2>/dev/null | grep -q region0 && return 0
+    [ -e /sys/bus/cxl/devices/region0 ] && return 0
+    return 1
+}
+
+wait_for_daxdev()
+{
+    for i in $(seq 1 ${DAXDEV_WAIT_ATTEMPTS}); do
+        for devpath in /sys/bus/dax/devices/dax*; do
+            [ -e "${devpath}" ] && return 0
+        done
+        sleep 1
+    done
+
+    return 1
+}
+
+echo "[rcS] CXL system-ram setup start"
+
+modprobe cxl_acpi cxl_pci cxl_mem cxl_port cxl_region dax_cxl kmem 2>/dev/null || true
+
+if [ ! -x "${CXL}" ]; then
+    echo "[rcS] missing ${CXL}"
+elif [ ! -x "${DAXCTL}" ]; then
+    echo "[rcS] missing ${DAXCTL}"
+else
+    wait_for_memdev || dump_cxl_probe_state
+
+    echo "[rcS] cxl list before dax reconfigure"
+    ${CXL} list || true
+
+    if ! memdev_active; then
+        echo "[rcS] skip create-region because mem0 is not active"
+    elif ! region_exists; then
+        echo "[rcS] region0 is missing; trying to create a RAM region"
+        for i in $(seq 1 ${REGION_CREATE_ATTEMPTS}); do
+            enable_memdev_if_present
+            if ! memdev_active; then
+                echo "[rcS] mem0 is not active yet; retrying region create"
+                sleep 1
+                continue
+            fi
+            ${CXL} create-region -t ram -d decoder0.0 -m mem0 || true
+            region_exists && break
+            sleep 1
+        done
+    fi
+
+    if region_exists && [ ! -d /sys/bus/dax/devices ]; then
+        echo "[rcS] no dax bus yet; toggling region0 once"
+        ${CXL} disable-region region0 -f || true
+        ${CXL} enable-region region0 || true
+    fi
+    wait_for_daxdev || true
+
+    echo "[rcS] daxctl list before system-ram"
+    ${DAXCTL} list -RDu || true
+
+    for devpath in /sys/bus/dax/devices/dax*; do
+        [ -e "${devpath}" ] || continue
+        dev=$(basename "${devpath}")
+        echo "[rcS] reconfigure ${dev} to system-ram"
+        ${DAXCTL} reconfigure-device --mode=system-ram -f "${dev}" || true
+    done
+
+    echo "[rcS] daxctl list after system-ram"
+    ${DAXCTL} list -RDu || true
+
+    echo "[rcS] cxl list after dax reconfigure"
+    ${CXL} list || true
+fi
+
+grep -E "MemTotal|DirectMap|Node" /proc/meminfo || true
+grep -A4 -B2 "CXL Window" /proc/iomem || true
+numactl -H || true
+
+echo "[rcS] CXL system-ram setup end"
+
+echo "Running experiment after CPU switch."
+
+echo "Running /root/ycsb_a.sh"
+cd /root || {
+    echo "ERROR: /root/ycsb_a.sh not found"
+    /sbin/m5 dumpstats
+    /sbin/m5 exit
+    exit 1
+}
+
+if [ ! -x ./ycsb_a.sh ]; then
+    chmod +x ./ycsb_a.sh
+fi
+
+./ycsb_a.sh
+status=$?
+echo "ycsb_a.sh exited with status ${status}"
+/sbin/m5 exit
+exit "${status}"

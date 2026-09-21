@@ -1,0 +1,1 @@
+sudo build/X86/gem5.opt -d numa2  configs/fs.py  --disk ../full-system-image/disks/parsec2.img --kernel ../kernel/linux/vmlinux --cpu-type X86TimingSimpleCPU --cxl-mem-size 1024MB --fast-forward=4980000000

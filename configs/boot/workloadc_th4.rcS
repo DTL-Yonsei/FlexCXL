@@ -1,0 +1,22 @@
+#!/bin/sh
+
+echo "Boot complete; requesting gem5 CPU switch."
+/sbin/m5 exit
+
+echo "Running experiment after CPU switch."
+/sbin/m5 resetstats
+
+echo "Running /root/ycsb_c.sh"
+cd /root || {
+    echo "ERROR: /root/ycsb_c.sh not found"
+    /sbin/m5 dumpstats
+    /sbin/m5 exit
+}
+
+if [ ! -x ./ycsb_c.sh ]; then
+    chmod +x ./ycsb_c.sh
+fi
+
+./ycsb_c.sh
+status=$?
+echo "ycsb_c.sh exited with status ${status}"

@@ -1,0 +1,738 @@
+/*
+ * Copyright (c) 2020 ARM Limited
+ * All rights reserved
+ *
+ * The license below extends only to copyright in the software and shall
+ * not be construed as granting a license to any other intellectual
+ * property including but not limited to intellectual property relating
+ * to a hardware implementation of the functionality of the software
+ * licensed hereunder.  You may use the software subject to the license
+ * terms below provided that you ensure that this notice is replicated
+ * unmodified and in its entirety in all distributions of the software,
+ * modified or unmodified, in source code or in binary form.
+ *
+ * Copyright (c) 1999-2013 Mark D. Hill and David A. Wood
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are
+ * met: redistributions of source code must retain the above copyright
+ * notice, this list of conditions and the following disclaimer;
+ * redistributions in binary form must reproduce the above copyright
+ * notice, this list of conditions and the following disclaimer in the
+ * documentation and/or other materials provided with the distribution;
+ * neither the name of the copyright holders nor the names of its
+ * contributors may be used to endorse or promote products derived from
+ * this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+machine(MachineType:CXLhost, "CXLhost Controller")
+ :
+  CXLSequencer * cxl_sequencer;
+  int l2_select_num_bits;
+
+  Cycles to_mem_ctrl_latency := 1;
+  MessageBuffer * requestToDevicecxl, network="To", virtual_network="0", vnet_type="request";
+  MessageBuffer * responsefromDevicecxl, network="From", virtual_network="2", vnet_type="response";
+
+  MessageBuffer * responseToDevicecxl, network="To", virtual_network="1", vnet_type="response";
+  MessageBuffer * requestfromDevicecxl, network="From", virtual_network="3", vnet_type="request";
+
+  // MessageBuffer * requestToMemory;
+  MessageBuffer * responseFromMemory;
+
+  MessageBuffer * requestFromMemory;
+  MessageBuffer * responseToMemory;
+
+  MessageBuffer * mandatoryQueue;
+
+
+{
+  state_declaration(State, desc="CXL states", default="CXLhost_State_I") {
+      I, AccessPermission:Invalid, desc="dir is the owner and memory is up-to-date, all other copies are Invalid";
+      BUSY_RD, AccessPermission:Busy, desc="Busy: currently processing a request";
+      BUSY_WR, AccessPermission:Busy, desc="Busy: currently processing a request";
+      I_C, AccessPermission:Busy, desc="controll flit response";
+      I_C_R, AccessPermission:Busy, desc="controll flit request";
+      //esj 2025-07-12
+      R_I_C, AccessPermission:Busy, desc="retry controll flit response";
+      R_I_C_R, AccessPermission:Busy, desc="retry controll flit request";
+
+  }
+
+  enumeration(Event, desc="CXL events") {
+    ReadRequest,  desc="A new read request";
+    WriteRequest, desc="A new write request";
+    RetryRead,    desc="A link-level retry of the outstanding CXL read";
+    RetryWrite,   desc="A link-level retry of the outstanding CXL write";
+    Data,         desc="Data from a CXL memory read";
+    Ack,          desc="CXL write to memory completed";
+    ReplayData,   desc="D2H retry of completed read data";
+    ReplayAck,    desc="D2H retry of completed write ack";
+    ACK_ctrl,     desc="CXL control flit from device";
+    send_ctrl,     desc="CXL control flit from host";
+
+    ReadRequest_dma,  desc="A new read request_dma";
+    WriteRequest_dma, desc="A new write request_dma";
+    Data_dma,         desc="Data from a CXL memory read_dma";
+    Ack_dma,          desc="CXL write to memory completed_dma";
+  }
+
+
+  // DirectoryEntry
+  // structure(Entry, desc="...", interface="AbstractCacheEntry", main="false") {
+  //   State CXL_host_State,          desc="CXL_host state";
+  //   MachineID Owner;
+  // }
+
+
+  structure(TBE, desc="...") {
+    State TBEState,    desc="Transient state";
+    DataBlock DataBlk, desc="Data";
+  }
+
+  structure(TBETable, external = "yes") {
+    TBE lookup(Addr);
+    void allocate(Addr);
+    void deallocate(Addr);
+    bool isPresent(Addr);
+  }
+
+
+  TBETable TBEs, template="<CXLhost_TBE>", constructor="m_number_of_TBEs";
+  int l2_select_low_bit, default="RubySystem::getBlockSizeBits()";
+
+  Tick clockEdge();
+  MachineID mapAddressToMachine(Addr addr, MachineType mtype);
+
+  State getState(TBE tbe, Addr addr) {
+    if (is_valid(tbe)) {
+        return tbe.TBEState;
+    } else {
+        return State:I;
+    }
+  }
+
+  void setState(TBE tbe, Addr addr, State state) {
+    if (is_valid(tbe)) {
+        tbe.TBEState := state;
+    }
+  }
+
+  AccessPermission getAccessPermission(Addr addr) {
+    TBE tbe := TBEs[addr];
+    if(is_valid(tbe)) {
+        return CXLhost_State_to_permission(tbe.TBEState);
+    }
+
+    return AccessPermission:NotPresent;
+  }
+
+  void functionalRead(Addr addr, Packet *pkt) {
+    error("DMA does not support functional read.");
+  }
+
+  int functionalWrite(Addr addr, Packet *pkt) {
+    error("DMA does not support functional write.");
+  }
+
+  void setAccessPermission(Addr addr, State state) {
+  }
+
+  void wakeUpBuffers(Addr a);
+  void set_tbe(TBE a);
+  void unset_tbe();
+
+
+
+  out_port(requestToDevicecxl_out, RequestMsg, requestToDevicecxl, desc="...");
+  out_port(responseToDevicecxl_out, MemoryMsg, responseToDevicecxl, desc="...");
+
+  //cxl response
+  out_port(memqueue_out, MemoryMsg, responseFromMemory, desc="...");
+  //dma request
+  out_port(memqueue_dma_out, MemoryMsg, requestFromMemory, desc="...");
+
+
+  //CXL_host -> CXL_Device Req
+  // in_port(memqueue_in, MemoryMsg, requestToMemory, desc="...", rank = 0) {
+  in_port(mandatoryQueue_in, RubyRequest, mandatoryQueue, desc="...", rank = 0) {
+    if (mandatoryQueue_in.isReady(clockEdge())) {
+      peek(mandatoryQueue_in, RubyRequest, block_on="LineAddress") {
+        if (in_msg.Type == RubyRequestType:LD) {
+          trigger(Event:ReadRequest, in_msg.LineAddress, TBEs[in_msg.LineAddress]);
+        }
+        else if (in_msg.Type == RubyRequestType:ST){
+          trigger(Event:WriteRequest, in_msg.LineAddress, TBEs[in_msg.LineAddress]);
+        }
+        else if (in_msg.Type == RubyRequestType:CXL_RETRY_LD){
+          trigger(Event:RetryRead, in_msg.LineAddress, TBEs[in_msg.LineAddress]);
+        }
+        else if (in_msg.Type == RubyRequestType:CXL_RETRY_ST){
+          trigger(Event:RetryWrite, in_msg.LineAddress, TBEs[in_msg.LineAddress]);
+        }
+        //esj 2025-04-06
+        else if (in_msg.Type == RubyRequestType:CXL_CTRL_FLIT){
+          trigger(Event:send_ctrl, in_msg.LineAddress, TBEs[in_msg.LineAddress]);
+        }
+        else {
+          DPRINTF(RubyGenerated, "%s\n", in_msg);
+          error("Invalid message");
+        }
+      }
+    }
+  }
+
+  //CXL_Device -> CXL_host Resp
+  in_port(responsefromDevicecxl_in, ResponseMsg, responsefromDevicecxl, rank = 1) {
+    if (responsefromDevicecxl_in.isReady(clockEdge())) {
+      peek(responsefromDevicecxl_in, ResponseMsg) {
+        if (in_msg.Type == CoherenceResponseType:MEMORY_DATA) {
+          if (cxl_sequencer.isRetryResponse(in_msg.cxl_pkt)) {
+            trigger(Event:ReplayData, in_msg.addr, TBEs[in_msg.addr]);
+          }
+          else {
+            trigger(Event:Data, in_msg.addr, TBEs[in_msg.addr]);
+          }
+        }
+        else if (in_msg.Type == CoherenceResponseType:MEMORY_ACK) {
+          if (cxl_sequencer.isRetryResponse(in_msg.cxl_pkt)) {
+            trigger(Event:ReplayAck, in_msg.addr, TBEs[in_msg.addr]);
+          }
+          else {
+            trigger(Event:Ack, in_msg.addr, TBEs[in_msg.addr]);
+          }
+        }
+        else if (in_msg.Type == CoherenceResponseType:ACK_CTRL){
+          trigger(Event:ACK_ctrl, in_msg.addr, TBEs[in_msg.addr]);
+        }
+        else {
+          DPRINTF(RubyGenerated, "%s\n", in_msg.Type);
+          error("Invalid message");
+        }
+      }
+    }
+  }
+
+  //CXL_host -> CXL_Device Resp - dma response
+  in_port(memqueue_dma_in, MemoryMsg, responseToMemory, desc="...", rank = 0) {
+    if (memqueue_dma_in.isReady(clockEdge())) {
+      peek(memqueue_dma_in, MemoryMsg) {
+        if (in_msg.Type == MemoryRequestType:MEMORY_READ) {
+          trigger(Event:Data_dma, in_msg.addr, TBEs[in_msg.addr]);
+        }
+        else if (in_msg.Type == MemoryRequestType:MEMORY_WB){
+          trigger(Event:Ack_dma, in_msg.addr, TBEs[in_msg.addr]);
+        }
+        else {
+          DPRINTF(RubyGenerated, "%s\n", in_msg);
+          error("Invalid message");
+        }
+      }
+    }
+  }
+
+  //CXL_Device -> CXL_host Req - dma requset
+  in_port(requestfromDevicecxl_in, MemoryMsg, requestfromDevicecxl, desc="...", rank = 0) {
+    if (requestfromDevicecxl_in.isReady(clockEdge())) {
+      peek(requestfromDevicecxl_in, MemoryMsg) {
+        if (in_msg.Type == MemoryRequestType:MEMORY_READ) {
+          trigger(Event:ReadRequest_dma, in_msg.addr, TBEs[in_msg.addr]);
+        }
+        else if (in_msg.Type == MemoryRequestType:MEMORY_WB){
+          trigger(Event:WriteRequest_dma, in_msg.addr, TBEs[in_msg.addr]);
+        }
+        else {
+          DPRINTF(RubyGenerated, "%s\n", in_msg);
+          error("Invalid message");
+        }
+      }
+    }
+  }
+
+
+
+  //CXL_host -> CXL_Device Req/READ
+  action(IR_issueREAD, "IR", desc="Issue READ") {
+    peek(mandatoryQueue_in, RubyRequest) {
+      enqueue(requestToDevicecxl_out, RequestMsg, to_mem_ctrl_latency) {
+        out_msg.addr := address;
+        // out_msg.Type := MemoryRequestType:MEMORY_READ;
+        out_msg.Type := CoherenceRequestType:CXL_read;
+        // out_msg.Sender := machineID;
+        out_msg.MessageSize := MessageSizeType:Request_Control;
+        // out_msg.Len := 0;
+        out_msg.Requestor := machineID;
+        //esj 2025-04-01
+        out_msg.cxl_pkt := in_msg.pkt;
+        // out_msg.Destination.add(mapAddressToRange(address, MachineType:CXLdevice,l2_select_low_bit,l2_select_num_bits));
+        out_msg.Destination.add(mapAddressToMachine(address, MachineType:CXLdevice));
+        DPRINTF(RubyGenerated, "address: %#x, destination: %s, requestor = %d\n",address, out_msg.Destination,out_msg.Requestor);
+        out_msg.MessageSize := MessageSizeType:Control;
+        // out_msg.Prefetch := in_msg.Prefetch;
+        out_msg.AccessMode := in_msg.AccessMode;
+        DPRINTF(RubyGenerated, "Forwarding READ request to Device: Addr=%#x\n", address);
+      }
+    }
+  }
+  //CXL_host -> CXL_Device Req/WRITE
+  action(IW_issueWRITE, "IW", desc="Issue Write") {
+    peek(mandatoryQueue_in, RubyRequest) {
+      enqueue(requestToDevicecxl_out, RequestMsg, to_mem_ctrl_latency) {
+        out_msg.addr := address;
+        // out_msg.Type := MemoryRequestType:MEMORY_WB;
+        out_msg.Type := CoherenceRequestType:CXL_write;
+        // out_msg.Sender := machineID;
+        out_msg.MessageSize := MessageSizeType:Request_Control;
+        // out_msg.Len := 0;
+        out_msg.Requestor := machineID;
+        //esj 2025-04-01
+        out_msg.cxl_pkt := in_msg.pkt;
+        // out_msg.Destination.add(mapAddressToRange(address, MachineType:CXLdevice,l2_select_low_bit,l2_select_num_bits));
+        out_msg.Destination.add(mapAddressToMachine(address, MachineType:CXLdevice));
+        DPRINTF(RubyGenerated, "address: %#x, destination: %s, requestor = %d\n",address, out_msg.Destination,out_msg.Requestor);
+        out_msg.MessageSize := MessageSizeType:Control;
+        // out_msg.Prefetch := in_msg.Prefetch;
+        out_msg.AccessMode := in_msg.AccessMode;
+        DPRINTF(RubyGenerated, "Forwarding WRITE request to Device: Addr=%#x\n", address);
+      }
+    }
+  }
+
+  action(IR_retryREAD, "IRR", desc="Retry the outstanding CXL READ") {
+    peek(mandatoryQueue_in, RubyRequest) {
+      enqueue(requestToDevicecxl_out, RequestMsg, to_mem_ctrl_latency) {
+        out_msg.addr := address;
+        out_msg.Type := CoherenceRequestType:CXL_retry_read;
+        out_msg.MessageSize := MessageSizeType:Control;
+        out_msg.Requestor := machineID;
+        out_msg.cxl_pkt := in_msg.pkt;
+        out_msg.Destination.add(mapAddressToMachine(address, MachineType:CXLdevice));
+        out_msg.AccessMode := in_msg.AccessMode;
+      }
+    }
+  }
+
+  action(IW_retryWRITE, "IWR", desc="Retry the outstanding CXL WRITE") {
+    peek(mandatoryQueue_in, RubyRequest) {
+      enqueue(requestToDevicecxl_out, RequestMsg, to_mem_ctrl_latency) {
+        out_msg.addr := address;
+        out_msg.Type := CoherenceRequestType:CXL_retry_write;
+        out_msg.MessageSize := MessageSizeType:Control;
+        out_msg.Requestor := machineID;
+        out_msg.cxl_pkt := in_msg.pkt;
+        out_msg.Destination.add(mapAddressToMachine(address, MachineType:CXLdevice));
+        out_msg.AccessMode := in_msg.AccessMode;
+      }
+    }
+  }
+
+  action(d_sendData, "d", desc="Send data to requestor") {
+    peek(responsefromDevicecxl_in, ResponseMsg) {
+      enqueue(memqueue_out, MemoryMsg, to_mem_ctrl_latency) {
+        out_msg.addr := address;
+        out_msg.Type := MemoryRequestType:MEMORY_DATA;
+        out_msg.Sender := machineID;
+        // out_msg.Destination.add(in_msg.OriginalRequestorMachId);
+        out_msg.DataBlk := in_msg.DataBlk;
+        //esj 2025-04-02
+        out_msg.cxl_pkt := in_msg.cxl_pkt;
+        out_msg.MessageSize := MessageSizeType:Response_Data;
+      }
+    }
+  }
+
+  action(aa_sendAck, "aa", desc="Send ack to requestor") {
+    peek(responsefromDevicecxl_in, ResponseMsg) {
+      enqueue(memqueue_out, MemoryMsg, to_mem_ctrl_latency) {
+        out_msg.addr := address;
+        out_msg.Type := MemoryRequestType:MEMORY_ACK;
+        out_msg.Sender := machineID;
+        //esj 2025-04-02
+        out_msg.cxl_pkt := in_msg.cxl_pkt;
+        // out_msg.Destination.add(in_msg.OriginalRequestorMachId);
+        out_msg.MessageSize := MessageSizeType:Response_Control;
+      }
+    }
+  }
+
+  //dma
+  //CXL_host -> CXL_Device Req/WRITE
+  action(IS_issueData, "IRD", desc="Issue READ Data") {
+    peek(memqueue_dma_in, MemoryMsg) {
+      enqueue(responseToDevicecxl_out, MemoryMsg, to_mem_ctrl_latency) {
+        out_msg.addr := address;
+        out_msg.Type := MemoryRequestType:MEMORY_DATA;
+        out_msg.Sender := machineID;
+        out_msg.MessageSize := MessageSizeType:Request_Control;
+        out_msg.Len := 0;
+      }
+    }
+  }
+
+  action(IW_issueAck, "IWC", desc="Issue Write complete") {
+    peek(memqueue_dma_in, MemoryMsg) {
+      enqueue(responseToDevicecxl_out, MemoryMsg, to_mem_ctrl_latency) {
+        out_msg.addr := address;
+        out_msg.Type := MemoryRequestType:MEMORY_ACK;
+        out_msg.Sender := machineID;
+        out_msg.MessageSize := MessageSizeType:Request_Control;
+        out_msg.Len := 0;
+      }
+    }
+  }
+
+  //CXL_Device -> CXL_host Req/READ
+  action(IR_issueREAD_dma, "IRDM", desc="Issue READ dma") {
+    peek(requestfromDevicecxl_in, MemoryMsg) {
+      enqueue(memqueue_dma_out, MemoryMsg, to_mem_ctrl_latency) {
+        out_msg.addr := address;
+        out_msg.Type := MemoryRequestType:MEMORY_READ;
+        out_msg.Sender := machineID;
+        out_msg.MessageSize := MessageSizeType:Request_Control;
+        out_msg.Len := 0;
+      }
+    }
+  }
+  //CXL_Device -> CXL_host Req/WRITE
+  action(IW_issueWRITE_dma, "IWDM", desc="Issue Write dma") {
+    peek(requestfromDevicecxl_in, MemoryMsg) {
+      enqueue(memqueue_dma_out, MemoryMsg, to_mem_ctrl_latency) {
+        out_msg.addr := address;
+        out_msg.Type := MemoryRequestType:MEMORY_WB;
+        out_msg.Sender := machineID;
+        out_msg.MessageSize := MessageSizeType:Request_Control;
+        out_msg.Len := 0;
+      }
+    }
+  }
+
+  action(response_read, "rr", desc="Notify sequencer the load completed.")
+  {
+    DPRINTF(RubySlicc, "response_read\n");
+    peek(responsefromDevicecxl_in, ResponseMsg) {
+      DataBlock data := in_msg.DataBlk;
+      // cxl_sequencer.readCallback(address, data, true);
+      PacketPtr cxl_pkt := in_msg.cxl_pkt;
+      cxl_sequencer.readCallback(cxl_pkt);
+    }
+  }
+  action(response_write, "rw", desc="Notify sequencer the store completed.")
+  {
+    DPRINTF(RubySlicc, "response_write\n");
+    peek(responsefromDevicecxl_in, ResponseMsg) {
+      DataBlock data := in_msg.DataBlk;
+      // cxl_sequencer.writeCallback(address, data);
+      PacketPtr cxl_pkt := in_msg.cxl_pkt;
+      cxl_sequencer.writeCallback(cxl_pkt);
+    }
+  }
+
+  //esj 2025-04-06
+  action(recv_ctrl_flit, "sc", desc="recv control flit") {
+    peek(responsefromDevicecxl_in, ResponseMsg) {
+        PacketPtr cxl_pkt := in_msg.cxl_pkt;
+        cxl_sequencer.writeCallback(cxl_pkt);
+    }
+  }
+
+  action(send_ctrl_flit, "scr", desc="send control flit") {
+    peek(mandatoryQueue_in, RubyRequest) {
+        enqueue(requestToDevicecxl_out, RequestMsg, to_mem_ctrl_latency) {
+        out_msg.addr := address;
+        out_msg.Type := CoherenceRequestType:CXL_control_flit;
+        out_msg.MessageSize := MessageSizeType:Request_Control;
+        out_msg.Requestor := machineID;
+        out_msg.cxl_pkt := in_msg.pkt;
+        out_msg.Destination.add(mapAddressToMachine(address, MachineType:CXLdevice));
+        DPRINTF(RubyGenerated, "address: %#x, destination: %s, requestor = %d\n",address, out_msg.Destination,out_msg.Requestor);
+        out_msg.MessageSize := MessageSizeType:Control;
+        out_msg.AccessMode := in_msg.AccessMode;
+        DPRINTF(RubyGenerated, "Forwarding send control flit to Device: Addr=%#x\n", address);
+      }
+    }
+  }
+
+
+  action(l_popRequestQueueTOHostcxl, "q", desc="Pop off-chip request queue") {
+    mandatoryQueue_in.dequeue(clockEdge());
+  }
+  action(popresponsefromDevicecxl, "presponse", desc="Pop response queue") {
+    if (responsefromDevicecxl_in.isReady(clockEdge())) {
+      responsefromDevicecxl_in.dequeue(clockEdge());
+    } else {
+      DPRINTF(RubyGenerated, "Queue not ready! skipping dequeue.\n");
+    }
+  }
+
+
+  action(kd_wakeUpDependents, "kd", desc="wake-up dependents") {
+    wakeUpBuffers(address);
+  }
+
+  action(v_allocateTBE, "v", desc="Allocate TBE") {
+    peek(mandatoryQueue_in, RubyRequest) {
+      // TBEs.allocate(address);
+      // set_tbe(TBEs[address]);
+      // DPRINTF(RubyGenerated, "set after Allocated TBE for Addr=%#x\n", address);
+      if (!TBEs.isPresent(address)) {
+            TBEs.allocate(address);
+            set_tbe(TBEs[address]);
+            DPRINTF(RubyGenerated, "Allocated TBE for Addr=%#x\n", address);
+        } else {
+            DPRINTF(RubyGenerated, "TBE already present for Addr=%#x\n", address);
+        }
+    }
+  }
+  action(s_deallocateTBE, "s", desc="Deallocate TBE") {
+    TBEs.deallocate(address);
+    unset_tbe();
+    DPRINTF(RubyGenerated, "Deallocated  TBE for Addr=%#x\n", address);
+  }
+
+  action(k_popMandatoryQueue, "k", desc="Pop mandatory queue.") {
+    mandatoryQueue_in.dequeue(clockEdge());
+  }
+
+  action(z_stallAndWaitMandatoryQueue, "z", desc="Stall and wait for the active CXL request") {
+    stall_and_wait(mandatoryQueue_in, address);
+  }
+
+  // // TRANSITIONS
+  // transition({I}, {ReadRequest, WriteRequest,}) {
+  //   z_stallAndWaitMandatoryQueue;
+  // }
+
+  action(o_popIncomingResponseQueue, "o",
+    desc="Pop Incoming Response queue and profile the delay within this virtual network") {
+    Tick delay := responsefromDevicecxl_in.dequeue(clockEdge());
+  }
+
+  transition(I, ReadRequest, BUSY_RD) {
+    v_allocateTBE;
+    IR_issueREAD;
+    kd_wakeUpDependents;
+    k_popMandatoryQueue;
+  }
+
+  // A single TBE tracks one same-address memory response.  Do not issue a
+  // second request while that response is outstanding; otherwise its late
+  // Data/Ack can arrive after a conflicting request changes the busy state.
+  transition(I_C, ReadRequest, BUSY_RD) {
+    IR_issueREAD;
+    kd_wakeUpDependents;
+    k_popMandatoryQueue;
+  }
+
+  transition(BUSY_RD, ReadRequest) {
+    z_stallAndWaitMandatoryQueue;
+  }
+
+  transition(BUSY_RD, WriteRequest) {
+    z_stallAndWaitMandatoryQueue;
+  }
+
+  transition({BUSY_RD, I_C, I_C_R, R_I_C, R_I_C_R}, RetryRead) {
+    IR_retryREAD;
+    k_popMandatoryQueue;
+  }
+
+  // A request rejected before entering Ruby first appears here as a retry.
+  // It must establish the normal transaction state before being forwarded.
+  transition(I, RetryRead, BUSY_RD) {
+    v_allocateTBE;
+    IR_retryREAD;
+    k_popMandatoryQueue;
+  }
+
+  transition(I, RetryWrite, BUSY_WR) {
+    v_allocateTBE;
+    IW_retryWRITE;
+    k_popMandatoryQueue;
+  }
+
+  transition({BUSY_RD, I_C, I_C_R, R_I_C_R, R_I_C}, Data, I) { //esj 2025-07-12 R_I_C_R, R_I_C is added
+    // d_sendData;
+    response_read;
+    s_deallocateTBE;
+    kd_wakeUpDependents;
+    popresponsefromDevicecxl;
+  }
+  //esj 2025-04-10
+  // transition(I, Data, I) {
+  //   // d_sendData;
+  //   response_read;
+  //   kd_wakeUpDependents;
+  //   popresponsefromDevicecxl;
+  // }
+
+  transition(I, WriteRequest,BUSY_WR) {
+    v_allocateTBE;
+    IW_issueWRITE;
+    kd_wakeUpDependents;
+    k_popMandatoryQueue;
+  }
+
+  transition(I_C, WriteRequest, BUSY_WR) {
+    IW_issueWRITE;
+    kd_wakeUpDependents;
+    k_popMandatoryQueue;
+  }
+
+  transition(BUSY_WR, WriteRequest) {
+    z_stallAndWaitMandatoryQueue;
+  }
+
+  transition(BUSY_WR, ReadRequest) {
+    z_stallAndWaitMandatoryQueue;
+  }
+
+  transition({BUSY_WR, I_C, I_C_R, R_I_C, R_I_C_R}, RetryWrite) {
+    IW_retryWRITE;
+    k_popMandatoryQueue;
+  }
+
+  transition({BUSY_WR, I_C_R, R_I_C_R, I_C, R_I_C}, Ack, I) {  //esj 2025-07-12 R_I_C_R, I_C, R_I_C is added
+    // aa_sendAck;
+    response_write;
+    s_deallocateTBE;
+    kd_wakeUpDependents;
+    popresponsefromDevicecxl;
+  }
+
+  // A D2H link replay has already completed its Ruby transaction once.  It
+  // must traverse the host-side datapath again without changing a newer TBE.
+  transition({I, BUSY_RD, BUSY_WR, I_C, I_C_R, R_I_C, R_I_C_R},
+             ReplayData) {
+    response_read;
+    popresponsefromDevicecxl;
+  }
+
+  transition({I, BUSY_RD, BUSY_WR, I_C, I_C_R, R_I_C, R_I_C_R},
+             ReplayAck) {
+    response_write;
+    popresponsefromDevicecxl;
+  }
+
+    //esj 2025-05-09
+  transition({I}, Ack, I_C) {
+    response_write;
+    kd_wakeUpDependents;
+    popresponsefromDevicecxl;
+  }
+  transition({I}, Data, I_C) {
+    response_read;
+    kd_wakeUpDependents;
+    popresponsefromDevicecxl;
+  }
+
+  //esj 2025-04-10
+  // transition(I, Ack, I){
+  //   response_write;
+  //   kd_wakeUpDependents;
+  //   k_popMandatoryQueue;
+  // }
+
+  //controll flit
+  transition({BUSY_RD, BUSY_WR, I_C_R, I, R_I_C_R, R_I_C}, ACK_ctrl, I_C) {  //esj 2025-07-12 R_I_C_R is added //esj 2025-08-22 R_I_C is added BUSY_WR is added
+    recv_ctrl_flit;
+    kd_wakeUpDependents;
+    popresponsefromDevicecxl;
+  }
+
+  transition({BUSY_RD, BUSY_WR, I, I_C, R_I_C, R_I_C_R}, send_ctrl, I_C_R) { //esj 2025-07-12 R_I_C is added //esj 2025-08-22 R_I_C_R is added
+    send_ctrl_flit;
+    kd_wakeUpDependents;
+    k_popMandatoryQueue;
+  }
+
+  //esj 2025-07-12
+  transition({I_C}, ACK_ctrl, R_I_C) {
+    recv_ctrl_flit;
+    kd_wakeUpDependents;
+    popresponsefromDevicecxl;
+  }
+
+  transition({I_C_R}, send_ctrl, R_I_C_R) {
+    send_ctrl_flit;
+    kd_wakeUpDependents;
+    k_popMandatoryQueue;
+  }
+  //
+
+
+  // transition(I_C, Data, I) {
+  //   // d_sendData;
+  //   response_read;
+  //   o_popIncomingResponseQueue
+  //   kd_wakeUpDependents;
+  // }
+  // transition(I_C, Ack, I) {
+  //   // aa_sendAck;
+  //   response_write;
+  //   o_popIncomingResponseQueue
+  //   kd_wakeUpDependents;
+  // }
+  // transition(I, Data, I_C) {
+  //   // d_sendData;
+  //   response_read;
+  //   o_popIncomingResponseQueue
+  //   kd_wakeUpDependents;
+  // }
+  // transition(I, Ack, I_C) {
+  //   // aa_sendAck;
+  //   response_write;
+  //   o_popIncomingResponseQueue
+  //   kd_wakeUpDependents;
+  // }
+
+  // transition(BUSY_WR, Ack, BUSY_WR) {
+  //   // s_deallocateTBE;
+  //   // aa_sendAck;
+  //   response_write;
+  //   kd_wakeUpDependents;
+  // }
+  // transition(BUSY_RD, Ack, BUSY_RD) {
+  //   // d_sendData;
+  //   response_read;
+  //   // s_deallocateTBE;
+  //   kd_wakeUpDependents;
+  // }
+
+  //dma
+  transition(I, ReadRequest_dma,BUSY_RD) {
+    IR_issueREAD_dma;
+    kd_wakeUpDependents;
+    k_popMandatoryQueue;
+  }
+
+  transition(BUSY_RD, Data_dma, I) {
+    IS_issueData;
+    kd_wakeUpDependents;
+  }
+
+  transition(I, WriteRequest_dma,BUSY_WR) {
+    IW_issueWRITE;
+    kd_wakeUpDependents;
+    k_popMandatoryQueue;
+  }
+
+  transition(BUSY_WR, Ack_dma, I) {
+    IW_issueAck;
+    kd_wakeUpDependents;
+  }
+
+
+}

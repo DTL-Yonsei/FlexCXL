@@ -1,0 +1,1 @@
+sudo build/X86/gem5.opt -d numa2 --debug-flags=CXLDRAMsim3,CoherentXBar,NoncoherentXBar,PciBridge2  configs/fs.py  --disk ../full-system-image/disks/parsec2.img --kernel ../kernel/linux/vmlinux --cpu-type=X86TimingSimpleCPU --fast-forward=4980000000 --cxl-mem-size 512MB --mem-size 512MB

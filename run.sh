@@ -1,0 +1,1 @@
+sudo build/X86/gem5.opt --debug-flags=CXLDRAMsim3 --debug-flags=PciBridge2 --debug-flags=PciDevice -d numa2  configs/fs.py  --disk ../full-system-image/disks/parsec2.img --kernel ../kernel/linux/vmlinux --cpu-type=X86KvmCPU --cxl-mem-size 4GB
