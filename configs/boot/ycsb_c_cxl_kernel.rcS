@@ -1,0 +1,56 @@
+#!/bin/sh
+
+/sbin/m5 exit
+
+CXL_BUILD=/home/ndctl/build
+CXL=${CXL_BUILD}/cxl/cxl
+DAXCTL=${CXL_BUILD}/daxctl/daxctl
+
+echo "[rcS] CXL system-ram setup start"
+modprobe cxl_acpi cxl_pci cxl_mem cxl_port cxl_region dax_cxl kmem 2>/dev/null || true
+
+if [ ! -x "${CXL}" ]; then
+    echo "[rcS] missing ${CXL}"
+elif [ ! -x "${DAXCTL}" ]; then
+    echo "[rcS] missing ${DAXCTL}"
+else
+    for i in $(seq 1 30); do
+        ${CXL} list -M 2>/dev/null | grep -q memdev && break
+        sleep 1
+    done
+    ${CXL} list || true
+    if ! ${CXL} list 2>/dev/null | grep -q region0; then
+        ${CXL} create-region -t ram -d decoder0.0 -m mem0 || true
+    fi
+    if [ ! -d /sys/bus/dax/devices ]; then
+        ${CXL} disable-region region0 -f || true
+        ${CXL} enable-region region0 || true
+    fi
+    ${DAXCTL} list -RDu || true
+    for devpath in /sys/bus/dax/devices/dax*; do
+        [ -e "${devpath}" ] || continue
+        dev=$(basename "${devpath}")
+        ${DAXCTL} reconfigure-device --mode=system-ram -f "${dev}" || true
+    done
+    ${DAXCTL} list -RDu || true
+    ${CXL} list || true
+fi
+
+grep -E "MemTotal|DirectMap|Node" /proc/meminfo || true
+grep -A4 -B2 "CXL Window" /proc/iomem || true
+numactl -H || true
+echo "[rcS] CXL system-ram setup end"
+
+if [ ! -d /sys/devices/system/node/node1 ]; then
+    echo "[rcS] ERROR: NUMA node 1 is unavailable; refusing to run YCSB-C"
+    /sbin/m5 dumpstats
+    /sbin/m5 exit
+fi
+
+echo "[rcS] resetstats before YCSB-C"
+/sbin/m5 resetstats
+echo "[rcS] Running /root/ycsb_c.sh"
+/bin/bash /root/ycsb_c.sh
+status=$?
+echo "[rcS] ycsb_c.sh exited with status ${status}"
+/sbin/m5 exit

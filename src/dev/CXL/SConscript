@@ -1,0 +1,69 @@
+# -*- mode:python -*-
+
+# Copyright (c) 2006 The Regents of The University of Michigan
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are
+# met: redistributions of source code must retain the above copyright
+# notice, this list of conditions and the following disclaimer;
+# redistributions in binary form must reproduce the above copyright
+# notice, this list of conditions and the following disclaimer in the
+# documentation and/or other materials provided with the distribution;
+# neither the name of the copyright holders nor the names of its
+# contributors may be used to endorse or promote products derived from
+# this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+# OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+Import('*')
+
+SimObject('CXL_ctrl.py',sim_objects=['CXL_ctrl'])
+Source('CXL_ctrl.cc')
+DebugFlag('CXL_ctrl')
+
+SimObject('CXL_CRC.py',sim_objects=['CXL_CRC'])
+Source('CXL_CRC.cc')
+DebugFlag('CXL_CRC')
+
+SimObject('CXL_CRC_check.py',sim_objects=['CXL_CRC_check'])
+Source('CXL_CRC_check.cc')
+DebugFlag('CXL_CRC_check')
+
+SimObject('CXL_Decoder.py',sim_objects=['CXL_Decoder'])
+Source('CXL_Decoder.cc')
+DebugFlag('CXL_Decoder')
+
+SimObject('CXL_Encoder.py',sim_objects=['CXL_Encoder'])
+Source('CXL_Encoder.cc')
+DebugFlag('CXL_Encoder')
+
+SimObject('CXL_Deframer.py',sim_objects=['CXL_Deframer'])
+Source('CXL_Deframer.cc')
+DebugFlag('CXL_Deframer')
+
+SimObject('CXL_Framer.py',sim_objects=['CXL_Framer'])
+Source('CXL_Framer.cc')
+DebugFlag('CXL_Framer')
+
+SimObject('CXL_Packing.py',sim_objects=['CXL_Packing'])
+Source('CXL_Packing.cc')
+DebugFlag('CXL_Packing')
+
+SimObject('CXL_Unpacking.py',sim_objects=['CXL_Unpacking'])
+Source('CXL_Unpacking.cc')
+DebugFlag('CXL_Unpacking')
+
+SimObject('CXL_FlexBus.py',sim_objects=['CXL_FlexBus'])
+Source('CXL_FlexBus.cc')
+DebugFlag('CXL_FlexBus')

@@ -1,0 +1,25 @@
+#!/bin/sh
+
+echo "Boot complete; requesting gem5 CPU switch."
+/sbin/m5 exit
+
+echo "Running experiment after CPU switch."
+/sbin/m5 resetstats
+
+echo "Running /home/cxl_benchmark/lmbench_cxl.sh"
+cd /home/cxl_benchmark || {
+    echo "ERROR: /home/cxl_benchmark not found"
+    /sbin/m5 dumpstats
+    /sbin/m5 exit
+}
+
+if [ ! -x ./lmbench_cxl.sh ]; then
+    chmod +x ./lmbench_cxl.sh
+fi
+
+./lmbench_cxl.sh
+status=$?
+echo "lmbench_cxl.sh exited with status ${status}"
+
+/sbin/m5 dumpstats
+/sbin/m5 exit
